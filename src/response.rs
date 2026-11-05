@@ -1,3 +1,4 @@
+const GZIP_COMPRESSION_LEVEL: u8 = 6;
 #[derive(Copy, Clone)]
 #[repr(u16)]
 pub enum StatusCode {
@@ -29,6 +30,9 @@ impl TryFrom<u16> for StatusCode {
             _ => Err("Invalid status code"),
         }
     }
+}
+pub enum Compression {
+    Gzip,
 }
 pub struct Response {
     pub status_code: StatusCode,
@@ -93,5 +97,24 @@ impl Response {
             bytes.extend_from_slice(body);
         }
         bytes
+    }
+}
+impl Response {
+    pub fn compress(self, format: Compression) -> Self {
+        match format {
+            Compression::Gzip => {
+                if let Some(data) = self.body {
+                    let data = gzippy::compress(&data, GZIP_COMPRESSION_LEVEL).unwrap();
+                    return Response {
+                        status_code: self.status_code,
+                        header_fields: self.header_fields,
+                        body: Some(data),
+                        version: self.version,
+                    }
+                    .header("Content-Encoding", "gzip");
+                }
+                self
+            }
+        }
     }
 }

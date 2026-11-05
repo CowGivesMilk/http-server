@@ -1,3 +1,5 @@
+use crate::response::Compression;
+
 use super::file_handler::FileHandler;
 use super::response::{Response, StatusCode};
 use anyhow::{Context, Result, anyhow, bail};
@@ -133,24 +135,37 @@ impl Request {
 }
 impl Request {
     pub async fn route(self, file_handler: &FileHandler) -> Response {
-        match (self.request_lines.method, self.request_lines.uri.as_str()) {
+        // Destructure once: `headers` is borrowed (never moved) below,
+        // so it can still be inspected for `Accept-Encoding` after the match.
+        let Request {
+            request_lines,
+            headers,
+            message,
+        } = self;
+        let method = request_lines.method;
+        let uri = request_lines.uri;
+
+        let result = match (method, uri.as_str()) {
             (Method::GET, "/") => Response::new(StatusCode::Ok, None::<Vec<u8>>, "HTTP/1.1")
                 .header("Content-Type", "text/plain"),
+
             (Method::GET, "/user-agent") => {
-                let mut user_agent = String::new();
-                for (key, value) in self.headers {
-                    if key.eq_ignore_ascii_case("user-agent") {
-                        user_agent = value;
-                    }
-                }
+                let user_agent = headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+
                 Response::new(StatusCode::Ok, Some(user_agent), "HTTP/1.1")
                     .header("Content-Type", "text/plain")
             }
+
             (Method::GET, path) if path.starts_with("/echo/") => {
                 let echoed = &path["/echo/".len()..];
                 Response::new(StatusCode::Ok, Some(echoed.as_bytes().to_vec()), "HTTP/1.1")
                     .header("Content-Type", "text/plain")
             }
+
             (Method::GET, file) if file.starts_with("/files/") => {
                 let file_path = &file["/files/".len()..];
                 match file_handler.get_file_data(file_path) {
@@ -158,27 +173,41 @@ impl Request {
                         .header("Content-Type", "application/octet-stream"),
                     Ok(None) => Response::new(StatusCode::NotFound, None::<Vec<u8>>, "HTTP/1.1"),
                     Err(e) => {
-                        eprintln!("file read error for {}: {e:#}", self.request_lines.uri);
+                        eprintln!("file read error for {uri}: {e:#}");
                         Response::new(StatusCode::NotFound, None::<Vec<u8>>, "HTTP/1.1")
                     }
                 }
             }
+
             (Method::POST, file) if file.starts_with("/files/") => {
                 let file_path = &file["/files/".len()..];
-                if file_path.len() == 0 {
+                if file_path.is_empty() {
                     Response::new(StatusCode::BadRequest, None::<Vec<u8>>, "HTTP/1.1")
+                } else if file_handler.write_to_file(file_path, &message) {
+                    Response::new(StatusCode::Created, None::<Vec<u8>>, "HTTP/1.1")
                 } else {
-                    match file_handler.write_to_file(file_path, &self.message) {
-                        true => Response::new(StatusCode::Created, None::<Vec<u8>>, "HTTP/1.1"),
-                        false => Response::new(
-                            StatusCode::InternalServerError,
-                            None::<Vec<u8>>,
-                            "HTTP/1.1",
-                        ),
-                    }
+                    Response::new(StatusCode::InternalServerError, None::<Vec<u8>>, "HTTP/1.1")
                 }
             }
+
             _ => Response::new(StatusCode::NotFound, None::<Vec<u8>>, "HTTP/1.1"),
+        };
+
+        // A client "accepts gzip" if any encoding in the comma-separated
+        // list (ignoring ;q=… parameters) equals "gzip", case-insensitively.
+        let wants_gzip = headers.iter().any(|(key, value)| {
+            key.eq_ignore_ascii_case("accept-encoding")
+                && value
+                    .split(',')
+                    .map(|item| item.split(';').next().unwrap_or("").trim())
+                    .any(|enc| enc.eq_ignore_ascii_case("gzip"))
+        });
+
+        // `compress` is the only place that sets `Content-Encoding: gzip`.
+        if wants_gzip {
+            result.compress(Compression::Gzip)
+        } else {
+            result
         }
     }
 }
