@@ -1,3 +1,4 @@
+//response
 const GZIP_COMPRESSION_LEVEL: u8 = 6;
 #[derive(Copy, Clone)]
 #[repr(u16)]

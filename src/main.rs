@@ -1,11 +1,13 @@
-use anyhow::Result;
+//main
+use anyhow::{Ok, Result};
 use http_server::file_handler::FileHandler;
 use http_server::request::Request;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
+const TCP_BIND_ADDRESS: &'static str = "127.0.0.1:4221";
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<String>>();
@@ -17,7 +19,7 @@ async fn main() -> Result<()> {
     // Built once, validated once, shared by every connection.
     let file_handler = Arc::new(FileHandler::try_new(target_dir)?);
 
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    let listener = TcpListener::bind(TCP_BIND_ADDRESS).await?;
     println!("listening on {}", listener.local_addr()?);
 
     loop {
@@ -30,24 +32,32 @@ async fn main() -> Result<()> {
         });
     }
 }
-
 async fn handle_connection(stream: TcpStream, file_handler: Arc<FileHandler>) -> Result<()> {
     let mut reader = BufReader::new(stream);
-    let req = Request::parse_request(&mut reader).await?;
+    loop {
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            return Ok(()); // clean close, no error
+        }
 
-    println!(
-        "{:?} {} ({} headers, {} body bytes)\n{}",
-        req.request_lines.method,
-        req.request_lines.uri,
-        req.headers.len(),
-        req.message.len(),
-        req.message
-    );
+        let req = Request::parse_request(&mut reader).await?; // real error here = malformed/truncated request
+        let close = req.request_lines.version.as_str() == "HTTP/1.0"
+            || req.headers.iter().any(|(h, v)| {
+                h.eq_ignore_ascii_case("connection") && v.eq_ignore_ascii_case("close")
+            });
 
-    let response = req.route(&file_handler).await;
-
-    let stream = reader.get_mut();
-    stream.write_all(&response.to_bytes()).await?;
-    stream.shutdown().await?;
-    Ok(())
+        let response = match close {
+            true => req.route(&file_handler).await.header("connection", "clode"),
+            false => req
+                .route(&file_handler)
+                .await
+                .header("connection", "keep-alive"),
+        };
+        let stream = reader.get_mut();
+        stream.write_all(&response.to_bytes()).await?;
+        if close {
+            stream.shutdown().await?;
+            return Ok(());
+        }
+    }
 }
