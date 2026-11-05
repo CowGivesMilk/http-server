@@ -2,14 +2,20 @@
 #[repr(u16)]
 pub enum StatusCode {
     Ok = 200,
+    Created = 201,
+    BadRequest = 400,
     NotFound = 404,
+    InternalServerError = 500,
 }
 
 impl StatusCode {
     pub fn phrase(self) -> &'static str {
         match self {
             StatusCode::Ok => "OK",
+            StatusCode::Created => "Created",
+            StatusCode::BadRequest => "Bad request",
             StatusCode::NotFound => "Not Found",
+            StatusCode::InternalServerError => "Internal Server Error",
         }
     }
 }
@@ -27,26 +33,26 @@ impl TryFrom<u16> for StatusCode {
 pub struct Response {
     pub status_code: StatusCode,
     pub header_fields: Vec<(String, String)>,
-    pub body: String,
-    has_content_length_: bool,
+    pub body: Option<Vec<u8>>,
+    version: String,
 }
 
 impl Response {
-    pub fn new(status_code: StatusCode, body: impl Into<String>) -> Self {
+    pub fn new(
+        status_code: StatusCode,
+        body: Option<impl Into<Vec<u8>>>,
+        version: impl Into<String>,
+    ) -> Self {
         Self {
             status_code,
             header_fields: Vec::new(),
-            body: body.into(),
-            has_content_length_: false,
+            body: body.map(Into::into),
+            version: version.into(),
         }
     }
 
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        let name = name.into();
-        if name.eq_ignore_ascii_case("content-length") {
-            self.has_content_length_ = true;
-        }
-        self.header_fields.push((name, value.into()));
+        self.header_fields.push((name.into(), value.into()));
         self
     }
 
@@ -55,31 +61,37 @@ impl Response {
 
         let mut out = String::new();
 
-        // Status line
-        writeln!(
+        write!(
             out,
-            "HTTP/1.1 {} {}",
+            "{} {} {}\r\n",
+            self.version,
             self.status_code as u16,
             self.status_code.phrase()
         )
         .unwrap();
 
-        // User-supplied headers
         for (name, value) in &self.header_fields {
+            // We compute this ourselves below; a caller-supplied one could disagree with the body
+            if name.eq_ignore_ascii_case("content-length") {
+                continue;
+            }
             write!(out, "{}: {}\r\n", name, value).unwrap();
         }
 
-        // Auto Content-Length unless caller set one
-        if !self.has_content_length_ && !self.body.is_empty() {
-            write!(out, "Content-Length: {}\r\n", self.body.len()).unwrap();
-        }
+        // Content-Length semantics:
+        //   Some(bytes) => exact byte length (0 for empty file)
+        //   None        => no body; RFC 7230 lets us omit Content-Length for
+        //                  responses that aren't 1xx/204/304 only if we close
+        //                  the connection. Safer to send 0.
+        let content_length = self.body.as_ref().map_or(0, |b| b.len());
+        write!(out, "Content-Length: {}\r\n", content_length).unwrap();
 
-        // Blank line separating headers from body
         out.push_str("\r\n");
 
-        // Body
-        out.push_str(&self.body);
-
-        out.into_bytes()
+        let mut bytes = out.into_bytes();
+        if let Some(body) = &self.body {
+            bytes.extend_from_slice(body);
+        }
+        bytes
     }
 }

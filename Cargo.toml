@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+tokio = { version = "1.54.1", features = ["full"] }
